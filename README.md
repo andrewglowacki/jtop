@@ -52,7 +52,7 @@ is called by:
 
 ![Example output](stacks.png)
 
-## Other nodes about stack mode:
+## Other notes about stack mode:
 
 Each percentage is that frame's occurrence within that stack / the total root samples.
 
