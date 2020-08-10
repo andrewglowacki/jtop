@@ -1,8 +1,7 @@
 package jtop;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -10,74 +9,69 @@ import java.util.Map;
 import java.util.NavigableSet;
 import java.util.TreeSet;
 
-import org.jline.terminal.Terminal;
-
 public class StacksPrinter extends Printer {
 
-    private int samples = 0;
-    private Node root = new Node("root");
+    private volatile int samples = 0;
+    private volatile Node root;
 
-    public StacksPrinter(Terminal terminal, Config config) throws IOException {
-        super(terminal, config);
+    public StacksPrinter(Config config) throws IOException {
+        super(config);
+        newRoot();
+    }
+
+    private void newRoot() {
+        samples = 0;
+        root = new Node("root - PID: " + config.getPid());
     }
 
     @Override
-    public boolean handleCommand() throws IOException {
-        Character command = handleGeneralCommand();
-        if (command == null) {
-            return true;
-        }
+    protected Map<Character, PrinterCommandHandler> createHandlers() {
+        Map<Character, PrinterCommandHandler> handlers = super.createHandlers();
+        handlers.put('l', this::setLimitPercentage);
+        handlers.put('r', this::resetStats);
+        return handlers;
+    }
 
-        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
-        
-        switch (command) {
-            case 'c':
-                System.out.println("Exiting stacks mode, entering top mode");
-                return false;
-            case 'l':
-                System.out.print("Enter stack occurrence percent threshold (%): ");
-                config.parseStacksLimitPercent(reader.readLine());
-                return true;
-            case 'r':
-                System.out.println("Stats reset.");
-                samples = 0;
-                root = new Node("root");
-                return true;
-            default:
-                return true;
-        }
+    private void setLimitPercentage(TerminalLineReader reader) throws IOException {
+        config.parseStacksLimitPercent(reader.readLine("Enter stack occurrence percent threshold (%): "));
+        System.out.println("\rStack occurrence threshold is now: " + Math.round(config.getStacksLimitPercent() * 100.0));
+    }
+
+    private synchronized void resetStats(TerminalLineReader reader) throws IOException {
+        newRoot();
+        System.out.println("\rStack stats successfully reset.");
     }
 
     @Override
-    public boolean run() throws IOException {
-        int lastSize = 2;
-        while (true) {
-            addSample(Executor.sampleJvm(config.getPid()));
-
-            int size = root.getTotalFrames() + 1;
-            if (size < lastSize) {
-                System.out.println();
-            }
-            lastSize = size;
-            System.out.println("current: " + size + " last: " + lastSize);
-            root.print("");
-
-            System.out.println();
-            
-            String commands = "Commands: (i) set interval  |  (l) set stacks percent limit  | (r) reset stats  |  (n) filter by name ";
-            commands += config.hasNameRegex() ? "[+]" : "[-]";
-            commands += "  |  (f) filter by frame ";
-            commands += config.hasFrameFilter() ? "[+]" : "[-]";
-            commands += "  | (c) top cpu mode : ";
-            System.out.print(commands);
-
-            if (waitForInterval(size)) {
-                return true;
-            }
-        }
+    protected String getCommandsString() {
+        String commands = "Cmds: (i)nterval | (l)imit | (r)eset | (n)ame filter:";
+        commands += config.hasNameRegex() ? "+" : "-";
+        commands += " | (f)rame filter:";
+        commands += config.hasFrameFilter() ? "+" : "-";
+        commands += " | (s)wap mode : ";
+        return commands;
     }
 
-    public void addSample(Collection<ThreadInfo> threads) {
+    @Override
+    protected void runLoop() throws IOException, InterruptedException {
+        synchronized (this) {
+            if (active) {
+                addSample(Executor.sampleJvm(config.getPid()));
+            }
+
+            List<String> output = new ArrayList<>();
+            if (samples > 0) {
+                root.print("", new StringBuilder(), output);
+            } else {
+                output.add("root - PID: " + config.getPid() + " - no results");
+            }
+            this.output = output;
+        }
+
+        Thread.sleep(config.getInterval());
+    }
+
+    public synchronized void addSample(Collection<ThreadInfo> threads) {
         for (ThreadInfo thread : threads) {
             if (!config.matchesNameRegex(thread)) {
                 continue;
@@ -106,36 +100,26 @@ public class StacksPrinter extends Printer {
             return count;
         }
 
-        public void print(String indent) {
+        public void print(String indent, StringBuilder builder, List<String> output) {
             double rate = (double)count / (double)samples;
 
-            System.out.print(indent);
-            System.out.print(frame);
-            System.out.print(" - ");
-            System.out.print(count);
-            System.out.print(" (");
-            System.out.print(format.format(rate * 100));
-            System.out.println(" %)");
+            builder.setLength(0);
+            builder.append(indent);
+            builder.append(frame);
+            builder.append(" - ");
+            builder.append(count);
+            builder.append(" (");
+            builder.append(format.format(rate * 100));
+            builder.append(" %)");
+            output.add(builder.toString());
 
             if (rate > config.getStacksLimitPercent()) {
                 for (Node child : sorted) {
-                    child.print(indent + "|  ");
+                    child.print(indent + "|  ", builder, output);
                 }
             }
         }
         
-        public int getTotalFrames() {
-            int frames = 1;
-            double rate = (double)count / (double)samples;
-
-            if (rate > config.getStacksLimitPercent()) {
-                for (Node child : sorted) {
-                    frames += child.getTotalFrames();
-                }
-            }
-            return frames;
-        }
-
         public void add(List<String> frames, int index) {
             count++;
             if (index < 0) {

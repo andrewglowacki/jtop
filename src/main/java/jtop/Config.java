@@ -13,6 +13,26 @@ public class Config {
     private volatile long cpuTimeCutoff = 1;
     private volatile int topLimit = 20;
     private volatile double stacksLimitPercent = 0.05;
+    private volatile Printer active;
+    private volatile Printer other;
+
+    public void swapActive() {
+        Printer swap = active;
+        active = other;
+        other = swap;
+
+        active.setActive(true);
+        other.setActive(false);
+    }
+
+    public void setActive(Printer active, Printer other) {
+        this.active = active;
+        this.other = other;
+    }
+
+    public Printer getActive() {
+        return active;
+    }
 
     public double getStacksLimitPercent() {
         return stacksLimitPercent;
@@ -34,6 +54,18 @@ public class Config {
     }
     public long getInterval() {
         return interval;
+    }
+    public Pattern getNameRegex() {
+        return nameRegex;
+    }
+    public boolean isNegateNameRegex() {
+        return negateNameRegex;
+    }
+    public String getFrameFilter() {
+        return frameFilter;
+    }
+    public boolean isNegateFrameFilter() {
+        return negateFrameFilter;
     }
 
     public void parseNameRegex(String nameRegex) {

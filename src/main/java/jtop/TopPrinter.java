@@ -1,72 +1,72 @@
 package jtop;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
 import java.util.TreeSet;
 
-import org.jline.terminal.Terminal;
-
 public class TopPrinter extends Printer {
 
+    private static final String[] LABELS = new String[] { "ms", "s", "m", "h", "d" };
+    private static final double[] AMOUNTS = new double[] { 1000.0, 60.0, 60.0, 24.0 };
     private final StacksPrinter stacks;
 
-    public TopPrinter(Terminal terminal, Config config, StacksPrinter stacks) throws IOException {
-        super(terminal, config);
+    public TopPrinter(Config config, StacksPrinter stacks) throws IOException {
+        super(config);
         this.stacks = stacks;
     }
 
     @Override
-    public boolean handleCommand() throws IOException {
-        Character command = handleGeneralCommand();
-        if (command == null) {
-            return true;
-        }
+    protected Map<Character, PrinterCommandHandler> createHandlers() {
+        Map<Character, PrinterCommandHandler> handlers = super.createHandlers();
+        handlers.put('c', this::setCpuTimeCutoff);
+        handlers.put('l', this::setTopLimit);
+        return handlers;
+    }
 
-        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+    private void setCpuTimeCutoff(TerminalLineReader reader) throws IOException {
+        config.parseCpuTimeCutoff(reader.readLine("Enter cpu time cutoff (ms): "));
+        System.out.print("\rcpu time cutoff is now: " + config.getCpuTimeCutoff() + " ms");
+    }
 
-        switch (command) {
-            case 'c':
-                System.out.print("Enter cpu time cutoff (ms): ");
-                config.parseCpuTimeCutoff(reader.readLine());
-                return true;
-            case 'l':
-                System.out.print("Enter top thread limit: ");
-                config.parseTopLimit(reader.readLine());
-                return true;
-            case 's':
-                System.out.println("Exiting top mode, entering stacks mode");
-                return false;
-            default:
-                return true;
-        }
+    private void setTopLimit(TerminalLineReader reader) throws IOException {
+        config.parseTopLimit(reader.readLine("Enter top thread limit: "));
+        System.out.print("\rtop thread limit is now: " + config.getTopLimit());
     }
 
     @Override
-    public boolean run() throws IOException {
-        
+    protected String getCommandsString() {
+        String commands = "Cmds: (i)nterval | (l)imit | (c)pu cutoff | (n)ame filter:";
+        commands += config.hasNameRegex() ? "+" : "-";
+        commands += " | (f)rame filter:";
+        commands += config.hasFrameFilter() ? "+" : "-";
+        commands += " | (s)wap mode : ";
+        return commands;
+    }
+
+    private void setWaiting() {
+        List<String> output = new ArrayList<>();
+        output.add("Waiting for first sample interval after " + config.getInterval() + " ms...");
+        this.output = output;
+    }
+
+    @Override
+    protected void runLoop() throws IOException, InterruptedException {
         Map<String, ThreadInfo> last = idToInfo(Executor.sampleJvm(config.getPid()));
         stacks.addSample(last.values());
-        System.out.println("Waiting for first sample interval after " + config.getInterval() + " ms...");
-        for (int i = 2; i < terminal.getHeight(); i++) {
-            System.out.println();
-        }
-
+        setWaiting();
         while (true) {
-            
-            if (waitForInterval(terminal.getHeight())) {
-                return true;
-            }
+            Thread.sleep(config.getInterval());
 
             NavigableSet<Stat> stats = new TreeSet<>();
 
-            double max = 0;
             Map<String, ThreadInfo> current = idToInfo(Executor.sampleJvm(config.getPid()));
-            stacks.addSample(current.values());
+            if (active) {
+                stacks.addSample(current.values());
+            }
             for (ThreadInfo currentInfo : current.values()) {
                 if (!config.keepThread(currentInfo)) {
                     continue;
@@ -79,7 +79,7 @@ public class TopPrinter extends Printer {
                 } else {
                     stat = new Stat(lastInfo, currentInfo);
                 }
-                if (stat.getTime() < config.getCpuTimeCutoff()) {
+                if (stat.getCurrentTime() < config.getCpuTimeCutoff()) {
                     continue;
                 }
 
@@ -87,35 +87,71 @@ public class TopPrinter extends Printer {
                 if (stats.size() > config.getTopLimit()) {
                     stats.pollFirst();
                 }
-                if (stat.getTime() > max) {
-                    max = stat.getTime();
-                }
             }
 
             stats = stats.descendingSet();
-            int timeLen = format.format(max).length() + 2;
+
+            int curTimeLen = 4;
+            int totTimeLen = 5;
+            for (Stat stat : stats) {
+                int thisCurTimeLen = labelTime(stat.getCurrentTime()).length();
+                int thisTotTimeLen = labelTime(stat.getTotalTime()).length();
+                
+                if (thisCurTimeLen > curTimeLen) {
+                    curTimeLen = thisCurTimeLen;
+                }
+                if (thisTotTimeLen > totTimeLen) {
+                    totTimeLen = thisTotTimeLen;
+                }
+            }
+
+            curTimeLen += 2;
+            totTimeLen += 2;
+
+            StringBuilder builder = new StringBuilder();
+            pad(builder, "LAST", curTimeLen);
+            pad(builder, "TOTAL", totTimeLen);
+            builder.append("THREAD NAME - PID: " + config.getPid());
+
+            List<String> output = new ArrayList<>(stats.size() + 1);
+            output.add(builder.toString());
+
+            if (stats.size() == 0) {
+                output.add("<no active threads>");
+            }
 
             for (Stat stat : stats) {
-                String timeStr = format.format(stat.getTime());
-                System.out.print(timeStr);
-                for (int i = timeStr.length(); i < timeLen; i++) {
-                    System.out.print(' ');
-                }
-                System.out.println(stat.getName());
+                builder.setLength(0);
+
+                String timeStr = labelTime(stat.getCurrentTime());
+                pad(builder, timeStr, curTimeLen);
+
+                timeStr = labelTime(stat.getTotalTime());
+                pad(builder, timeStr, totTimeLen);
+
+                builder.append(stat.getName());
+                output.add(builder.toString());
             }
+
+            this.output = output;
 
             last = current;
+        }
+    }
 
-            for (int i = stats.size() + 2; i < terminal.getHeight(); i++) {
-                System.out.println();
-            }
+    private String labelTime(double time) {
+        int label = 0;
+        for (int i = 0; i < AMOUNTS.length && time > AMOUNTS[i]; i++) {
+            time /= AMOUNTS[i];
+            label++;
+        }
+        return format.format(time) + "" + LABELS[label];
+    }
 
-            String commands = "Commands: (i) set interval  |  (l) set limit  | (c) set cpu cutoff  |  (n) filter by name ";
-            commands += config.hasNameRegex() ? "[+]" : "[-]";
-            commands += "  |  (f) filter by frame ";
-            commands += config.hasFrameFilter() ? "[+]" : "[-]";
-            commands += "  | (s) stacks mode : ";
-            System.out.print(commands);
+    private void pad(StringBuilder builder, String str, int to) {
+        builder.append(str);
+        for (int i = str.length(); i < to; i++) {
+            builder.append(' ');
         }
     }
 
@@ -128,31 +164,40 @@ public class TopPrinter extends Printer {
     public static class Stat implements Comparable<Stat> { 
         private final String id;
         private final String name;
-        private final double time;
-
+        private final double currentTime;
+        private final double totalTime;
         
         public Stat(ThreadInfo current) {
             id = current.getId();
             name = current.getName();
-            time = current.getCpuTime();
+            currentTime = current.getCpuTime();
+            totalTime = currentTime;
         }
 
         public Stat(ThreadInfo last, ThreadInfo current) {
             this.id = last.getId();
             this.name = current.getName();
-            this.time = current.getCpuTime() - last.getCpuTime();
+            this.currentTime = current.getCpuTime() - last.getCpuTime();
+            this.totalTime = current.getCpuTime();
         }
 
         public String getName() {
             return name;
         }
-        public double getTime() {
-            return time;
+        public double getCurrentTime() {
+            return currentTime;
+        }
+        public double getTotalTime() {
+            return totalTime;
         }
 
         @Override
         public int compareTo(Stat o) {
-            int diff = Double.compare(time, o.time);
+            int diff = Double.compare(currentTime, o.currentTime);
+            if (diff != 0) {
+                return diff;
+            }
+            diff = Double.compare(totalTime, o.totalTime);
             if (diff != 0) {
                 return diff;
             }

@@ -1,20 +1,25 @@
 package jtop;
 
-import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.PrintWriter;
 import java.text.NumberFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
-import org.jline.terminal.Terminal;
+public abstract class Printer implements Runnable {
 
-public abstract class Printer {
-
-    protected final Terminal terminal;
     protected final Config config;
     protected final NumberFormat format;
+    protected final Map<Character, PrinterCommandHandler> handlers;
+    protected volatile boolean active;
+    protected volatile List<String> output = new ArrayList<>(Arrays.asList("Collecting first sample..."));
 
-    public Printer(Terminal terminal, Config config) throws IOException {
-        this.terminal = terminal;
+    public Printer(Config config) throws IOException {
         this.config = config;
         
         NumberFormat format = NumberFormat.getInstance();
@@ -23,85 +28,93 @@ public abstract class Printer {
         format.setMinimumIntegerDigits(1);
         format.setGroupingUsed(false);
         this.format = format;
+        this.handlers = createHandlers();
     }
 
-    public abstract boolean handleCommand() throws IOException;
+    protected Map<Character, PrinterCommandHandler> createHandlers() {
+        Map<Character, PrinterCommandHandler> handlers = new HashMap<>();
+        handlers.put('i', this::setInterval);
+        handlers.put('n', this::setThreadNameRegex);
+        handlers.put('f', this::setFrameFilter);
+        handlers.put('s', this::swapActive);
+        return handlers;
+    }
 
-    public Character handleGeneralCommand() throws IOException {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
-        String commandLine = reader.readLine().trim();
-        if (commandLine.isEmpty()) {
-            return null;
+    public List<String> getOutput() {
+        return output;
+    }
+
+    private void swapActive(TerminalLineReader reader) {
+        config.swapActive();
+    }
+
+    private void setInterval(TerminalLineReader reader) {
+        try {
+            config.setInterval(Long.parseLong(reader.readLine("Enter new interval in (seconds): ")) * 1000);
+            System.out.print("\rNew interval now set to: " + (config.getInterval() / 1000) + " seconds.");
+        } catch (Exception ex) { }
+    }
+
+    private void setThreadNameRegex(TerminalLineReader reader) throws IOException {
+        config.parseNameRegex(reader.readLine("Enter thread name regex (empty to remove): "));
+        String message = "\rThread name filter is now: ";
+        if (config.getNameRegex() == null) {
+            message += "<not set>"; 
+        } else {
+            message += config.getNameRegex().pattern();
         }
+        if (config.isNegateNameRegex()) {
+            message += " (negated)";
+        }
+        
+        System.out.print(message);
+    }
 
-        char c = commandLine.charAt(0);
-        switch (c) {
-            case 'i':
-                System.out.print("Enter new interval in (seconds): ");
+    private void setFrameFilter(TerminalLineReader reader) throws IOException {
+        config.parseFrameFilter(reader.readLine("Enter stack frame string (empty to remove): "));
+        String message = "\rFrame filter is now: ";
+        if (config.getFrameFilter() == null) {
+            message += "<not set>";
+        } else {
+            message += config.getFrameFilter();
+        }
+        if (config.isNegateFrameFilter()) {
+            message += " (negated)";
+        }
+        
+        System.out.print(message);
+    }
+
+    public void setActive(boolean active) {
+        this.active = active;
+    }
+
+    protected abstract void runLoop() throws IOException, InterruptedException;
+
+    @Override
+    public void run() {
+        while (true) {
+            try {
+                runLoop();
+            } catch (InterruptedException ex) {
+                return;
+            } catch (Throwable ex) {
+                ByteArrayOutputStream bytesOut = new ByteArrayOutputStream();
+                try (PrintWriter writer = new PrintWriter(bytesOut)) {
+                    ex.printStackTrace(writer);
+                }
+                output = Arrays.stream(bytesOut.toString().split("\n"))
+                    .map(String::new)
+                    .collect(Collectors.toList());
                 try {
-                    config.setInterval(Long.parseLong(reader.readLine()) * 1000);
-                } catch (Exception ex) { }
-                break;
-            case 'n':
-                System.out.print("Enter thread name regex (empty to remove): ");
-                config.parseNameRegex(reader.readLine());
-                break;
-            case 'f':
-                System.out.print("Enter stack frame string (empty to remove): ");
-                config.parseFrameFilter(reader.readLine());
-                break;
-            default:
-                return c;
-        }
-
-        return null;
-    }
-
-    protected void skipRemaining(BufferedReader reader) throws IOException {
-        // skip extra input
-        while (System.in.available() > 0) {
-            reader.readLine();
+                    Thread.sleep(config.getInterval());
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
         }
     }
 
-    protected boolean waitForInterval(int clearBack) throws IOException {
-        try {
-            long duration = System.currentTimeMillis();
-            while (System.currentTimeMillis() - duration < config.getInterval()) {
-                Thread.sleep(250);
-                if (System.in.available() > 0) {
-                    break;
-                }
-            }
-            
-            System.out.print('\r');
-            if (System.in.available() > 0) {
-                if (!handleCommand()) {
-                    return true;
-                }
-            }
-        } catch (InterruptedException e) {
-            System.out.println();
-            return false;
-        }
-        try {
-            if (clearBack > terminal.getHeight()) {
-                System.out.print("\033[" + clearBack + "A"); // Move up
-                Thread.sleep(1000);
-                for (int i = terminal.getHeight(); i < clearBack; i++) {
-                    System.out.print("\033M"); // Move/scroll up one line
-                    Thread.sleep(1000);
-                }
-                System.out.print("\033[J"); // Clear screen from cursor down
-                Thread.sleep(1000);
-            } else {
-                System.out.print("\033[" + clearBack + "A"); // Move up
-                System.out.print("\033[J"); // Clear screen from cursor down
-            }
-        } catch (Throwable ex) { }
-        System.out.flush();
-        return false;
-    }
+    protected abstract String getCommandsString();
 
-    public abstract boolean run() throws IOException;
 }

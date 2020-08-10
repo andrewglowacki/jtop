@@ -4,6 +4,8 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 import org.apache.commons.cli.CommandLine;
@@ -17,7 +19,7 @@ import org.jline.terminal.TerminalBuilder;
 
 public class Runner {
     
-    private static final Options options = new Options()
+    public static final Options options = new Options()
         .addOption(Option.builder("i")
             .longOpt("interval")
             .hasArg(true)
@@ -51,7 +53,7 @@ public class Runner {
         .addOption(Option.builder("l")
             .longOpt("limit")
             .hasArg(true)
-            .desc("Limits the top X threads to display at once (default: 20), OR the top X % of frame occurrences (default: 95).")
+            .desc("Limits the top X threads to display at once (default: 20), OR the top X % of frame occurrences (default: 5).")
             .build())
         .addOption(Option.builder("h")
             .longOpt("help")
@@ -61,7 +63,6 @@ public class Runner {
             
     public static void main(String[] args) throws IOException, ParseException {
         String pid = null;
-        args = new String[] { "-s", "-i", "2" };
 
         if (args.length > 0 && args[0].matches("[0-9]+")) {
             pid = args[0];
@@ -97,26 +98,41 @@ public class Runner {
         config.parseFrameFilter(commandLine.getOptionValue("f", ""));
         config.parseNameRegex(commandLine.getOptionValue("n", ""));
         
-        Terminal terminal = TerminalBuilder.terminal();
+        try (Terminal terminal = TerminalBuilder
+            .builder()
+            .dumb(false)
+            .jna(true)
+            .build()) {
 
-        Printer current;
-        Printer other;
-        if (commandLine.hasOption("s")) {
-            config.parseStacksLimitPercent(commandLine.getOptionValue("l", "5"));
-            current = new StacksPrinter(terminal, config);
-            other = new TopPrinter(terminal, config, (StacksPrinter)current);
-        } else {
-            config.parseTopLimit(commandLine.getOptionValue("l", "20"));
-            config.parseCpuTimeCutoff(commandLine.getOptionValue("c", "1"));
+            ExecutorService executor = Executors.newFixedThreadPool(2);
+            try {
+                Printer current;
+                Printer other;
+                if (commandLine.hasOption("s")) {
+                    config.parseStacksLimitPercent(commandLine.getOptionValue("l", "5"));
+                    current = new StacksPrinter(config);
+                    other = new TopPrinter(config, (StacksPrinter)current);
+                } else {
+                    config.parseTopLimit(commandLine.getOptionValue("l", "20"));
+                    config.parseCpuTimeCutoff(commandLine.getOptionValue("c", "1"));
 
-            other = new StacksPrinter(terminal, config);
-            current = new TopPrinter(terminal, config, (StacksPrinter)other);
-        }
+                    other = new StacksPrinter(config);
+                    current = new TopPrinter(config, (StacksPrinter)other);
+                }
 
-        while (current.run()) {
-            Printer swap = current;
-            current = other;
-            other = swap;
+                current.setActive(true);
+                other.setActive(false);
+
+                config.setActive(current, other);
+
+                executor.submit(current);
+                executor.submit(other);
+
+                DisplayLoop.run(config, terminal);
+
+            } finally {
+                executor.shutdownNow();
+            }
         }
     }
 
