@@ -169,7 +169,7 @@ public class Runner {
 
             try {
                 int index = Integer.parseInt(input) - 1;
-                if (index < pids.size() && index > 0) {
+                if (index < pids.size() && index >= 0) {
                     return pids.get(index);
                 }
             } catch (Throwable ex) { }
