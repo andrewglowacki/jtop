@@ -138,7 +138,7 @@ public class Runner {
 
     private static void printHelp() {
         HelpFormatter formatter = new HelpFormatter();
-        formatter.printHelp("jtop (pid) (args)", options );
+        formatter.printHelp("jtop [pid] [args ...]", options );
     }
 
     private static String selectJvm() throws IOException {
